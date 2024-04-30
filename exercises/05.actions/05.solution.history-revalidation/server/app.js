@@ -1,4 +1,5 @@
-import { Readable } from 'node:stream'
+import { stream } from 'hono/streaming'
+import { Writable } from 'node:stream'
 import { serve } from '@hono/node-server'
 import { serveStatic } from '@hono/node-server/serve-static'
 import busboy from 'busboy'
@@ -15,7 +16,7 @@ import { shipDataStorage } from './async-storage.js'
 
 const PORT = process.env.PORT || 3000
 
-const app = new Hono()
+const app = new Hono({ strict: false })
 
 app.use(compress())
 
@@ -33,7 +34,7 @@ app.use(
 
 // This just cleans up the URL if the search ever gets cleared... Not important
 // for RSCs... Just ... I just can't help myself. I like URLs clean.
-app.use(({ req, redirect }) => {
+app.use(({ req, redirect }, next) => {
 	if (req.query.search === '') {
 		const searchParams = new URLSearchParams()
 		searchParams.delete('search')
@@ -42,6 +43,7 @@ app.use(({ req, redirect }) => {
 			.join('?')
 		return redirect(location, 302)
 	}
+	return next()
 })
 
 const moduleBasePath = new URL('../src', import.meta.url).href
@@ -52,14 +54,26 @@ async function renderApp(context, returnValue) {
 		const shipId = req.param('shipId') || null
 		const search = req.query('search') || ''
 		const data = { shipId, search }
-		const readable = new Readable()
-		shipDataStorage.run(data, () => {
-			const root = h(App)
-			const payload = { root, returnValue }
-			const { pipe } = renderToPipeableStream(payload, moduleBasePath)
-			pipe(readable)
+		return stream(context, async stream => {
+			await new Promise(resolve =>
+				shipDataStorage.run(data, async () => {
+					const root = h(App)
+					const payload = { root, returnValue }
+					const { pipe } = renderToPipeableStream(payload, moduleBasePath)
+					const writable = new Writable({
+						write(chunk, _encoding, callback) {
+							stream.write(chunk)
+							callback()
+						},
+					})
+					pipe(writable)
+					writable.on('close', () => {
+						stream.close()
+						resolve()
+					})
+				}),
+			)
 		})
-		return new Response(Readable.toWeb(readable))
 	} catch (error) {
 		console.error(error)
 		res.status(500).json({ error: error.message })
@@ -67,7 +81,7 @@ async function renderApp(context, returnValue) {
 }
 
 app.get('/rsc/:shipId?', async context => {
-	await renderApp(context, null)
+	return await renderApp(context, null)
 })
 
 app.post('/action/:shipId?', async context => {
@@ -85,7 +99,7 @@ app.post('/action/:shipId?', async context => {
 		headers: Object.fromEntries(context.req.raw.headers.entries()),
 	})
 	const reply = decodeReplyFromBusboy(bb, moduleBasePath)
-	Readable.fromWeb(context.req.raw.body).pipe(bb)
+	Writable.fromWeb(context.req.raw.body).pipe(bb)
 	const args = await reply
 	const result = await action(...args)
 
