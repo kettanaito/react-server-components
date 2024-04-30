@@ -81,8 +81,7 @@ async function renderApp(context, returnValue) {
 }
 
 app.get('/rsc/:shipId?', async context => {
-	const app = await renderApp(context, null)
-	return app
+	return await renderApp(context, null)
 })
 
 app.post('/action/:shipId?', async context => {
